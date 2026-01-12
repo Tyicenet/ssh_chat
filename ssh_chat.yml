@@ -1,0 +1,367 @@
+---
+<<<<<<< HEAD
+- name: SSH Chat via shared tmux session (chat logs in with password)
+=======
+- name: SSH chat via tmux (multi-user, password protected, auto-generated creds)
+>>>>>>> 7a57438 (Initial commit)
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars_prompt:
+<<<<<<< HEAD
+    - name: chat_password_plain
+      prompt: "Set password for shared chat user 'chat' (min 10 chars)"
+      private: true
+
+  vars:
+    chat_user: "chat"
+    chat_session: "sshchat"
+    chat_script_path: "/usr/local/bin/ssh-chat"
+    chat_dir: "/var/lib/sshchat"
+    chat_log: "/var/lib/sshchat/chat.log"
+
+    sshd_dropin_dir: "/etc/ssh/sshd_config.d"
+    sshd_dropin_file: "/etc/ssh/sshd_config.d/99-sshchat.conf"
+    sshd_main_config: "/etc/ssh/sshd_config"
+
+  pre_tasks:
+    - name: Enforce minimum chat password length
+      ansible.builtin.fail:
+        msg: "Chat password must be at least 10 characters."
+      when: chat_password_plain | length < 10
+
+  tasks:
+    - name: Install OpenSSH server + tmux
+      ansible.builtin.package:
+        name:
+          - openssh-server
+          - tmux
+=======
+    - name: chat_user_count
+      prompt: "How many chat users to create?"
+      private: false
+    - name: chat_user_prefix
+      prompt: "Username prefix (e.g. chat)"
+      private: false
+      default: "chat"
+
+  vars:
+    chat_group: sshchat
+    chat_session: sshchat
+    chat_script: /usr/local/bin/ssh-chat
+
+    chat_dir: /var/lib/sshchat
+    chat_log: /var/lib/sshchat/chat.log
+    chat_err: /var/lib/sshchat/chat.err
+
+    sshd_dropin_dir: /etc/ssh/sshd_config.d
+    sshd_dropin_file: /etc/ssh/sshd_config.d/99-sshchat.conf
+
+    # Password generation settings
+    chat_password_length: 16
+    chat_password_chars: "ascii_letters,digits"
+
+    # Where to save creds on your Ansible machine
+    creds_outfile: "./sshchat_credentials.txt"
+
+  pre_tasks:
+    - name: Validate user count
+      ansible.builtin.assert:
+        that:
+          - (chat_user_count | int) >= 1
+          - (chat_user_count | int) <= 200
+        fail_msg: "chat_user_count must be between 1 and 200"
+
+    - name: Build user list (prefix01..prefixNN)
+      ansible.builtin.set_fact:
+        chat_users: >-
+          {{
+            query('sequence', 'start=1 end=' ~ (chat_user_count | int) ~ ' format=%02d')
+            | map('regex_replace', '^', chat_user_prefix)
+            | list
+          }}
+
+    - name: Generate passwords for each user (on controller)
+      ansible.builtin.set_fact:
+        chat_passwords: "{{ chat_passwords | default({}) | combine({ item: lookup('password', '/dev/null length=' ~ chat_password_length ~ ' chars=' ~ chat_password_chars) }) }}"
+      loop: "{{ chat_users }}"
+      no_log: true
+
+  tasks:
+    - name: Install tmux, openssh-server, openssl
+      ansible.builtin.package:
+        name:
+          - tmux
+          - openssh-server
+          - openssl
+>>>>>>> 7a57438 (Initial commit)
+        state: present
+
+    - name: Ensure sshd drop-in directory exists
+      ansible.builtin.file:
+        path: "{{ sshd_dropin_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+<<<<<<< HEAD
+    - name: Ensure sshd main config includes sshd_config.d (safe)
+      ansible.builtin.lineinfile:
+        path: "{{ sshd_main_config }}"
+        line: "Include {{ sshd_dropin_dir }}/*.conf"
+        insertbefore: BOF
+        state: present
+      notify: Validate and restart sshd
+
+    - name: Create chat user
+      ansible.builtin.user:
+        name: "{{ chat_user }}"
+        shell: /bin/bash
+        create_home: true
+
+    - name: Set chat password
+      ansible.builtin.shell: |
+        set -e
+        echo "{{ chat_user }}:{{ chat_password_plain }}" | chpasswd
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Create chat dir + log
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: "{{ item.state }}"
+        owner: "{{ chat_user }}"
+        group: "{{ chat_user }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ chat_dir }}", state: "directory", mode: "0775" }
+        - { path: "{{ chat_log }}", state: "touch",     mode: "0664" }
+
+    - name: Install forced chat command
+      ansible.builtin.copy:
+        dest: "{{ chat_script_path }}"
+=======
+    - name: Ensure chat group exists
+      ansible.builtin.group:
+        name: "{{ chat_group }}"
+        state: present
+
+    - name: Create chat users and add to group
+      ansible.builtin.user:
+        name: "{{ item }}"
+        shell: /bin/bash
+        create_home: true
+        groups: "{{ chat_group }}"
+        append: true
+      loop: "{{ chat_users }}"
+
+    - name: Ensure chat accounts are usable (unlock + not expired)
+      ansible.builtin.shell: |
+        set -e
+        passwd -u {{ item }} 2>/dev/null || true
+        chage -E -1 -I -1 -m 0 -M 99999 {{ item }} 2>/dev/null || true
+      changed_when: false
+      failed_when: false
+      loop: "{{ chat_users }}"
+
+    - name: Set passwords (SHA-512 hash, robust)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        HASH="$(openssl passwd -6 '{{ chat_passwords[item] }}')"
+        usermod --password "$HASH" '{{ item }}'
+      args:
+        executable: /bin/bash
+      loop: "{{ chat_users }}"
+      no_log: true
+
+    - name: Ensure chat directory exists (shared, group-writable, setgid)
+      ansible.builtin.file:
+        path: "{{ chat_dir }}"
+        state: directory
+        owner: root
+        group: "{{ chat_group }}"
+        mode: "2775"
+
+    - name: Ensure chat log files exist (shared)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: touch
+        owner: root
+        group: "{{ chat_group }}"
+        mode: "0664"
+      loop:
+        - "{{ chat_log }}"
+        - "{{ chat_err }}"
+
+    - name: Install forced chat command
+      ansible.builtin.copy:
+        dest: "{{ chat_script }}"
+>>>>>>> 7a57438 (Initial commit)
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/usr/bin/env bash
+<<<<<<< HEAD
+          set -euo pipefail
+
+          umask 077
+          export PATH="/usr/bin:/bin"
+          export TERM="${TERM:-xterm-256color}"
+
+          SESSION="{{ chat_session }}"
+          CHAT_LOG="{{ chat_log }}"
+
+          SRC_IP="${SSH_CONNECTION%% *}"
+          NICK="user-$(echo "$SRC_IP" | tr . -)-$((RANDOM % 1000))"
+
+          echo
+          echo "========================================="
+          echo " SSH CHAT ROOM: $SESSION"
+          echo " Nick: $NICK"
+          echo " Type a message and press Enter."
+          echo " Ctrl-b d to detach (tmux)."
+          echo "========================================="
+          echo
+
+          if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+            tmux new-session -d -s "$SESSION"
+            tmux send-keys -t "$SESSION":0.0 "tail -n 200 -f '$CHAT_LOG'" C-m
+            tmux split-window -v -t "$SESSION":0
+            tmux resize-pane -t "$SESSION":0.1 -y 6
+            tmux send-keys -t "$SESSION":0.1 \
+              "bash -lc 'while true; do printf \"> \"; IFS= read -r msg || exit; ts=\$(date \"+%Y-%m-%d %H:%M:%S\"); printf \"%s [%s] %s\n\" \"\$ts\" \"\$NICK\" \"\$msg\" >> \"\$CHAT_LOG\"; done'" \
+=======
+          set -e
+
+          SESSION="{{ chat_session }}"
+          LOG="{{ chat_log }}"
+          ERR="{{ chat_err }}"
+          CHATDIR="{{ chat_dir }}"
+          export TERM="${TERM:-xterm-256color}"
+
+          if ! command -v tmux >/dev/null 2>&1; then
+            echo "tmux not installed."
+            exit 1
+          fi
+
+          mkdir -p "$CHATDIR"
+          touch "$LOG" "$ERR" || true
+
+          if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+            tmux new-session -d -s "$SESSION" 2>>"$ERR" || {
+              echo "Failed to start tmux. See $ERR"
+              exit 1
+            }
+            tmux send-keys -t "$SESSION":0.0 "tail -n 200 -f '$LOG'" C-m
+            tmux split-window -v -t "$SESSION":0 2>>"$ERR"
+            tmux resize-pane -t "$SESSION":0.1 -y 6 2>>"$ERR" || true
+            tmux send-keys -t "$SESSION":0.1 \
+              "bash -lc 'while true; do printf \"> \"; IFS= read -r msg || exit; ts=\$(date \"+%Y-%m-%d %H:%M:%S\"); printf \"%s [%s] %s\n\" \"\$ts\" \"\$USER\" \"\$msg\" >> \"{{ chat_log }}\"; done'" \
+>>>>>>> 7a57438 (Initial commit)
+              C-m
+          fi
+
+          exec tmux attach-session -t "$SESSION"
+
+<<<<<<< HEAD
+    - name: Configure sshd restriction for chat user (drop-in)
+=======
+    - name: Configure sshd for chat group (password only, no keys)
+>>>>>>> 7a57438 (Initial commit)
+      ansible.builtin.copy:
+        dest: "{{ sshd_dropin_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+<<<<<<< HEAD
+          Match User {{ chat_user }}
+              ForceCommand {{ chat_script_path }}
+              PermitTTY yes
+
+              # Enable password login for chat only
+              PasswordAuthentication yes
+              KbdInteractiveAuthentication yes
+              AuthenticationMethods password
+
+              # Optional: force password-only (no keys) for chat
+              PubkeyAuthentication no
+
+              # Lock down forwarding/tunneling
+=======
+          Match Group {{ chat_group }}
+              ForceCommand {{ chat_script }}
+              PermitTTY yes
+
+              PasswordAuthentication yes
+              KbdInteractiveAuthentication no
+              PubkeyAuthentication no
+
+>>>>>>> 7a57438 (Initial commit)
+              X11Forwarding no
+              AllowTcpForwarding no
+              AllowAgentForwarding no
+              PermitTunnel no
+              GatewayPorts no
+<<<<<<< HEAD
+              PermitUserEnvironment no
+              PermitOpen none
+      notify: Validate and restart sshd
+
+  handlers:
+    - name: Validate and restart sshd
+      block:
+        - name: Validate sshd config
+          ansible.builtin.command: sshd -t
+          changed_when: false
+
+        - name: Restart ssh service
+          ansible.builtin.service:
+            name: "{{ 'ssh' if ansible_facts.os_family == 'Debian' else 'sshd' }}"
+            state: restarted
+=======
+      register: chat_dropin
+
+    - name: Validate sshd config
+      ansible.builtin.command: sshd -t
+      changed_when: false
+      when: chat_dropin.changed
+
+    - name: Restart SSH service
+      ansible.builtin.service:
+        name: "{{ 'ssh' if ansible_facts.os_family == 'Debian' else 'sshd' }}"
+        state: restarted
+      when: chat_dropin.changed
+
+  post_tasks:
+    - name: Build credentials text (for display + saving locally)
+      ansible.builtin.set_fact:
+        creds_text: |
+          SSH Chat Credentials
+          ====================
+          Server: {{ inventory_hostname }}
+
+          {% for u in chat_users %}
+          {{ u }} : {{ chat_passwords[u] }}
+          {% endfor %}
+      no_log: true
+
+    - name: Save credentials to local file (controller)
+      ansible.builtin.copy:
+        dest: "{{ creds_outfile }}"
+        content: "{{ creds_text }}"
+        mode: "0600"
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+
+    - name: Show credentials (appears in terminal output)
+      ansible.builtin.debug:
+        msg: "{{ creds_text.split('\n') }}"
+      no_log: false
+>>>>>>> 7a57438 (Initial commit)
+
